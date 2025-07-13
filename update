@@ -1,0 +1,260 @@
+// This is the entire, final, and corrected code for your code.ts file.
+// Congratulations on building a fully functional, end-to-end AI application!
+
+// 1. Show the UI to the user when the plugin starts
+figma.showUI(__html__, { width: 340, height: 320 });
+
+// --- Define the 'shape' of our data for TypeScript ---
+type FlowNode = {
+  id: string;
+  text: string;
+  shape: 'RECTANGLE' | 'ELLIPSE' | 'DIAMOND';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  figmaNode: GroupNode | null;
+  connections: { toId: string; label?: string }[];
+  isDecision: boolean;
+  isPlaced: boolean;
+};
+
+// 2. Listen for messages from the UI (ui.html)
+figma.ui.onmessage = async (msg) => {
+  if (msg.type === 'generate-flow') {
+    const transcript = msg.transcript;
+    if (!transcript) {
+      figma.notify('Please paste a transcript first.', { error: true });
+      return;
+    }
+    await generateAndDrawFlowchart(transcript);
+  }
+};
+
+
+// 3. This is the main function that connects to Azure
+async function generateAndDrawFlowchart(transcript: string) {
+  figma.notify('Analyzing transcript with AI...', { timeout: 3000 });
+
+  const AZURE_ENDPOINT = "https://flowgen-sweden-ai.openai.azure.com/";
+  const AZURE_API_KEY = "BssiW6JvHN98ox8BkaQVwlbyFqGnTmg6CcVAxjr3o1E9HnVvmjXBJQQJ99BGACfhMk5XJ3w3AAABACOGF5p";
+  const DEPLOYMENT_NAME = "gpt-4o-mini";
+  
+  const cleanEndpoint = AZURE_ENDPOINT.endsWith('/') ? AZURE_ENDPOINT.slice(0, -1) : AZURE_ENDPOINT;
+  const fullUrl = `${cleanEndpoint}/openai/deployments/${DEPLOYMENT_NAME}/chat/completions?api-version=2024-02-01`;
+
+  const systemPrompt = `You are an expert meeting assistant. Your job is to analyze a transcript and create a flowchart in valid Mermaid.js 'graph TD' syntax. Use standard symbols: A(Start/End) for ovals, B[Action] for rectangles, and C{Decision?} for diamonds. Always define nodes and connections on separate lines. For example: A[Action 1], B{Decision}, A --> B. For decisions, add labels like C -->|Yes| D and C -->|No| E.`;
+  const userPrompt = `Analyze this transcript and create the flowchart:\n\n${transcript}`;
+
+  try {
+    const response = await fetch(fullUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': AZURE_API_KEY },
+        body: JSON.stringify({
+          messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+          max_tokens: 1500,
+          temperature: 0.2,
+        }),
+      });
+    if (!(response as any).ok) { 
+        const errorBody = await (response as any).text();
+        throw new Error(`API request failed: ${errorBody}`);
+    }
+    const data = await (response as any).json();
+    const mermaidCode = data.choices[0].message.content;
+    console.log('--- AI Response (Mermaid Code) ---');
+    console.log(mermaidCode);
+    await drawFlowchartOnCanvas(mermaidCode);
+  } catch (error) {
+    console.error('Error in generateAndDrawFlowchart:', error);
+    if (error instanceof Error) {
+      figma.notify(`Error: ${error.message}`, { error: true });
+    } else {
+      figma.notify('An unknown error occurred.', { error: true });
+    }
+  }
+}
+
+// 4. THIS IS THE DEFINITIVE, PROFESSIONAL DRAWING FUNCTION WITH SMART RECURSIVE LAYOUT
+async function drawFlowchartOnCanvas(mermaidCode: string) {
+  await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+  figma.notify('Drawing professional flowchart...');
+
+  const nodes: Record<string, FlowNode> = {};
+  const lines = mermaidCode.replace(/```mermaid|```|graph TD/g, '').trim().split('\n');
+
+  const nodeRegex = /(\w+)(\[|\(|\{)(.*?)(\]|\)|\})/g;
+  const connectionRegex = /(\w+)\s*-->(?:\|(.*?)\|)?\s*(\w+)/;
+
+  for (const line of lines) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) continue;
+
+    let nodeMatch;
+    while ((nodeMatch = nodeRegex.exec(trimmedLine)) !== null) {
+      const [, id, open, text, close] = nodeMatch;
+      if (!nodes[id]) {
+        let shape: FlowNode['shape'] = 'RECTANGLE';
+        if (`${open}${close}` === '()') shape = 'ELLIPSE';
+        if (`${open}${close}` === '{}') shape = 'DIAMOND';
+        nodes[id] = { id, text, shape, x: 0, y: 0, width: 0, height: 0, figmaNode: null, connections: [], isDecision: shape === 'DIAMOND', isPlaced: false };
+      }
+    }
+    
+    const connectionMatch = trimmedLine.match(connectionRegex);
+    if (connectionMatch) {
+      const [, from, label, to] = connectionMatch;
+      if (nodes[from] && nodes[to]) {
+        nodes[from].connections.push({ toId: to, label: label || undefined });
+      }
+    }
+  }
+  
+  if (Object.keys(nodes).length === 0) {
+      figma.notify('Could not find any nodes to draw.', { error: true });
+      return;
+  }
+
+  // --- Smart Recursive Layout Engine ---
+  const V_GAP = 120;
+  const H_GAP = 280;
+  const tempTextNodes: TextNode[] = [];
+
+  function calculateNodeSize(nodeData: FlowNode) {
+    const textNode = figma.createText();
+    textNode.characters = nodeData.text;
+    textNode.fontSize = 14;
+    tempTextNodes.push(textNode);
+    nodeData.width = textNode.width + 80;
+    nodeData.height = textNode.height + 40;
+  }
+
+  // Calculate all node sizes first
+  Object.values(nodes).forEach(calculateNodeSize);
+  
+  function layoutBranch(nodeId: string, x: number, y: number): number {
+    const node = nodes[nodeId];
+    if (!node || node.isPlaced) return y;
+
+    node.x = x;
+    node.y = y;
+    node.isPlaced = true;
+
+    let maxY = y + node.height;
+    let currentY = y + V_GAP;
+    
+    if (node.isDecision) {
+      const yesConn = node.connections.find(c => c.label && c.label.toLowerCase() === 'yes');
+      const noConn = node.connections.find(c => c.label && c.label.toLowerCase() === 'no');
+      
+      let yesBranchEnd = currentY;
+      let noBranchEnd = currentY;
+
+      if (yesConn) {
+        yesBranchEnd = layoutBranch(yesConn.toId, x, currentY);
+      }
+      if (noConn) {
+        noBranchEnd = layoutBranch(noConn.toId, x + H_GAP, currentY);
+      }
+      maxY = Math.max(yesBranchEnd, noBranchEnd);
+    } else {
+      for (const conn of node.connections) {
+        const nextNode = nodes[conn.toId];
+        if (nextNode && !nextNode.isPlaced) {
+            maxY = layoutBranch(conn.toId, x, currentY);
+        }
+      }
+    }
+    return maxY;
+  }
+  
+  const startNodeId = Object.keys(nodes)[0];
+  layoutBranch(startNodeId, figma.viewport.center.x - 200, figma.viewport.center.y - 300);
+
+  // --- Drawing Pass (Back to Front) ---
+  const createdElements: SceneNode[] = [];
+  
+  // 1. Draw Connectors first
+  for (const id in nodes) {
+    const fromNode = nodes[id];
+    if (!fromNode.isPlaced) continue;
+    for (const conn of fromNode.connections) {
+        const toNode = nodes[conn.toId];
+        if (!toNode || !toNode.isPlaced) continue;
+
+        const connector = figma.createVector();
+        const startX = fromNode.x + fromNode.width / 2;
+        const startY = fromNode.y + fromNode.height;
+        const endX = toNode.x + toNode.width / 2;
+        const endY = toNode.y;
+        const elbowY = startY + V_GAP / 2;
+
+        await connector.setVectorNetworkAsync({
+            vertices: [
+                { x: startX, y: startY }, { x: startX, y: elbowY },
+                { x: endX, y: elbowY }, { x: endX, y: endY, strokeCap: 'ARROW_EQUILATERAL' }
+            ],
+            segments: [ { start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 } ]
+        });
+        
+        connector.strokes = [{ type: 'SOLID', color: { r: 0.2, g: 0.2, b: 0.2 } }];
+        connector.strokeWeight = 1.5;
+        createdElements.push(connector);
+
+        if (conn.label) {
+            const labelText = figma.createText();
+            labelText.characters = conn.label;
+            labelText.fontSize = 12;
+            labelText.x = fromNode.x > toNode.x ? startX - 30 : startX + 5;
+            labelText.y = elbowY - labelText.height - 5;
+            createdElements.push(labelText);
+        }
+    }
+  }
+
+  // 2. Draw Shapes and Text on top
+  for (const id in nodes) {
+    const nodeData = nodes[id];
+    if (!nodeData.isPlaced) continue;
+    
+    let shapeNode: RectangleNode | EllipseNode | PolygonNode;
+    if (nodeData.shape === 'DIAMOND') {
+        shapeNode = figma.createPolygon();
+        shapeNode.pointCount = 4;
+    } else if (nodeData.shape === 'ELLIPSE') {
+        shapeNode = figma.createEllipse();
+    } else {
+        shapeNode = figma.createRectangle();
+        shapeNode.cornerRadius = 8;
+    }
+
+    shapeNode.resize(nodeData.width, nodeData.height);
+    shapeNode.x = nodeData.x;
+    shapeNode.y = nodeData.y;
+    shapeNode.fills = [{ type: 'SOLID', color: { r: 0.9, g: 0.92, b: 1 } }];
+    shapeNode.strokes = [{ type: 'SOLID', color: { r: 0.2, g: 0.2, b: 0.2 } }];
+    shapeNode.strokeWeight = 1.0;
+
+    const textNode = figma.createText();
+    textNode.characters = nodeData.text;
+    textNode.fontSize = 14;
+    textNode.resize(nodeData.width - 20, nodeData.height - 20);
+    textNode.textAlignHorizontal = 'CENTER';
+    textNode.textAlignVertical = 'CENTER';
+    textNode.x = nodeData.x + 10;
+    textNode.y = nodeData.y + 10;
+    
+    const group = figma.group([shapeNode, textNode], figma.currentPage);
+    group.name = nodeData.text;
+    nodeData.figmaNode = group;
+    createdElements.push(group);
+  }
+
+  // Cleanup and final grouping
+  tempTextNodes.forEach(node => node.remove());
+  const finalGroup = figma.group(createdElements, figma.currentPage);
+  finalGroup.name = "Generated Flowchart";
+  figma.viewport.scrollAndZoomIntoView([finalGroup]);
+  
+  figma.notify('Flowchart created successfully!', { timeout: 3000 });
+}
